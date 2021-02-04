@@ -28,12 +28,16 @@ type testSaga struct {
 	num int
 }
 
+type testResponseContent struct {
+	value int
+}
+
 const testSagaType SagaType = 1
 
 const testRequestFirst RequestType = 1
 const testRequestSecond RequestType = 2
 
-func testSagaDecoder(data string) interface{} {
+func testSagaDecoder(string) interface{} {
 	return nil
 }
 
@@ -53,9 +57,31 @@ func TestCoordinator_Register(t *testing.T) {
 					return nil
 				},
 			},
+			{
+				Type:         testRequestSecond,
+				Dependencies: []RequestType{testRequestFirst},
+				OnRequest: func(ctx context.Context, sequence LogSequence, root interface{}, deps []interface{}) RequestOutput {
+					return RequestOutput{}
+				},
+				Decoder: func(data string) interface{} {
+					return nil
+				},
+			},
 		})
 
 	assert.Equal(t, 1, len(c.registry))
+
+	entry, existed := c.registry[testSagaType]
+	assert.True(t, existed)
+	assert.Equal(t, 2, len(entry.requests))
+
+	request1 := entry.requests[testRequestFirst]
+	assert.Equal(t, request1.dependencies, []RequestType(nil))
+	assert.Equal(t, request1.depended, []RequestType{testRequestSecond})
+
+	request2 := entry.requests[testRequestSecond]
+	assert.Equal(t, request2.dependencies, []RequestType{testRequestFirst})
+	assert.Equal(t, request2.depended, []RequestType(nil))
 }
 
 func TestCoordinator_RunLoop_Events(t *testing.T) {
@@ -100,6 +126,7 @@ func TestCoordinator_RunLoop_Events(t *testing.T) {
 							dependencyCompletedCount: 0,
 						},
 					},
+					completedRequests: map[RequestType]completedRequest{},
 				},
 			},
 			output: runLoopOutput{
@@ -113,10 +140,10 @@ func TestCoordinator_RunLoop_Events(t *testing.T) {
 				},
 				startRequests: []startRequest{
 					{
-						sequence:    11,
-						sagaType:    testSagaType,
-						requestType: testRequestFirst,
-						rootData: testSaga{
+						rootSequence: 11,
+						sagaType:     testSagaType,
+						requestType:  testRequestFirst,
+						rootContent: testSaga{
 							num: 100,
 						},
 					},
@@ -124,7 +151,87 @@ func TestCoordinator_RunLoop_Events(t *testing.T) {
 			},
 		},
 		{
-			name: "new-saga-with-existing",
+			name: "request-completed",
+			events: []Event{
+				{
+					Type:         EventTypeRequestCompleted,
+					SagaType:     testSagaType,
+					RootSequence: 18,
+					RequestType:  testRequestFirst,
+					Content: testResponseContent{
+						value: 120,
+					},
+					Data: "response.value: 120",
+				},
+			},
+			lastSequenceBefore: 20,
+			lastSequenceAfter:  21,
+			sagaStatesBefore: map[LogSequence]*sagaState{
+				18: {
+					sagaType: testSagaType,
+					content: testSaga{
+						num: 100,
+					},
+					activeRequests: map[RequestType]struct{}{
+						testRequestFirst: {},
+					},
+					waitingRequests: map[RequestType]waitingRequest{
+						testRequestSecond: {
+							dependencyCompletedCount: 0,
+						},
+					},
+					completedRequests: map[RequestType]completedRequest{},
+				},
+			},
+			sagaStatesAfter: map[LogSequence]*sagaState{
+				18: {
+					sagaType: testSagaType,
+					content: testSaga{
+						num: 100,
+					},
+					activeRequests: map[RequestType]struct{}{
+						testRequestSecond: {},
+					},
+					waitingRequests: map[RequestType]waitingRequest{},
+					completedRequests: map[RequestType]completedRequest{
+						testRequestFirst: {
+							response: testResponseContent{
+								value: 120,
+							},
+						},
+					},
+				},
+			},
+			output: runLoopOutput{
+				saveLogEntries: []LogEntry{
+					{
+						Sequence:     21,
+						RootSequence: 18,
+						Type:         EventTypeRequestCompleted,
+						SagaType:     testSagaType,
+						RequestType:  testRequestFirst,
+						Data:         "response.value: 120",
+					},
+				},
+				startRequests: []startRequest{
+					{
+						rootSequence: 18,
+						sagaType:     testSagaType,
+						requestType:  testRequestSecond,
+						rootContent: testSaga{
+							num: 100,
+						},
+						dependentResponses: []interface{}{
+							testResponseContent{
+								value: 120,
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "two-new-sagas",
 			events: []Event{
 				{
 					Type:     EventTypeNewSaga,
@@ -134,22 +241,142 @@ func TestCoordinator_RunLoop_Events(t *testing.T) {
 					},
 					Data: "num: 100",
 				},
+				{
+					Type:     EventTypeNewSaga,
+					SagaType: testSagaType,
+					Content: testSaga{
+						num: 200,
+					},
+					Data: "num: 200",
+				},
 			},
-			lastSequenceBefore: 20,
-			lastSequenceAfter:  21,
-			sagaStatesBefore: map[LogSequence]*sagaState{
-				20: {
+			lastSequenceBefore: 10,
+			lastSequenceAfter:  12,
+			sagaStatesBefore:   map[LogSequence]*sagaState{},
+			sagaStatesAfter: map[LogSequence]*sagaState{
+				11: {
 					sagaType: testSagaType,
 					content: testSaga{
-						num: 220,
+						num: 100,
+					},
+					activeRequests: map[RequestType]struct{}{
+						testRequestFirst: {},
+					},
+					waitingRequests: map[RequestType]waitingRequest{
+						testRequestSecond: {
+							dependencyCompletedCount: 0,
+						},
+					},
+					completedRequests: map[RequestType]completedRequest{},
+				},
+				12: {
+					sagaType: testSagaType,
+					content: testSaga{
+						num: 200,
+					},
+					activeRequests: map[RequestType]struct{}{
+						testRequestFirst: {},
+					},
+					waitingRequests: map[RequestType]waitingRequest{
+						testRequestSecond: {
+							dependencyCompletedCount: 0,
+						},
+					},
+					completedRequests: map[RequestType]completedRequest{},
+				},
+			},
+			output: runLoopOutput{
+				saveLogEntries: []LogEntry{
+					{
+						Sequence: 11,
+						Type:     EventTypeNewSaga,
+						SagaType: testSagaType,
+						Data:     "num: 100",
+					},
+					{
+						Sequence: 12,
+						Type:     EventTypeNewSaga,
+						SagaType: testSagaType,
+						Data:     "num: 200",
+					},
+				},
+				startRequests: []startRequest{
+					{
+						rootSequence: 11,
+						sagaType:     testSagaType,
+						requestType:  testRequestFirst,
+						rootContent: testSaga{
+							num: 100,
+						},
+					},
+					{
+						rootSequence: 12,
+						sagaType:     testSagaType,
+						requestType:  testRequestFirst,
+						rootContent: testSaga{
+							num: 200,
+						},
 					},
 				},
 			},
-			sagaStatesAfter: map[LogSequence]*sagaState{
-				20: {
+		},
+		{
+			name: "new-saga-and-request-completed",
+			events: []Event{
+				{
+					Type:     EventTypeNewSaga,
+					SagaType: testSagaType,
+					Content: testSaga{
+						num: 100,
+					},
+					Data: "num: 100",
+				},
+				{
+					Type:         EventTypeRequestCompleted,
+					SagaType:     testSagaType,
+					RootSequence: 18,
+					RequestType:  testRequestFirst,
+					Content: testResponseContent{
+						value: 120,
+					},
+					Data: "response.value: 120",
+				},
+			},
+			lastSequenceBefore: 20,
+			lastSequenceAfter:  22,
+			sagaStatesBefore: map[LogSequence]*sagaState{
+				18: {
 					sagaType: testSagaType,
 					content: testSaga{
-						num: 220,
+						num: 300,
+					},
+					activeRequests: map[RequestType]struct{}{
+						testRequestFirst: {},
+					},
+					waitingRequests: map[RequestType]waitingRequest{
+						testRequestSecond: {
+							dependencyCompletedCount: 0,
+						},
+					},
+					completedRequests: map[RequestType]completedRequest{},
+				},
+			},
+			sagaStatesAfter: map[LogSequence]*sagaState{
+				18: {
+					sagaType: testSagaType,
+					content: testSaga{
+						num: 300,
+					},
+					activeRequests: map[RequestType]struct{}{
+						testRequestSecond: {},
+					},
+					waitingRequests: map[RequestType]waitingRequest{},
+					completedRequests: map[RequestType]completedRequest{
+						testRequestFirst: {
+							response: testResponseContent{
+								value: 120,
+							},
+						},
 					},
 				},
 				21: {
@@ -165,6 +392,7 @@ func TestCoordinator_RunLoop_Events(t *testing.T) {
 							dependencyCompletedCount: 0,
 						},
 					},
+					completedRequests: map[RequestType]completedRequest{},
 				},
 			},
 			output: runLoopOutput{
@@ -175,14 +403,35 @@ func TestCoordinator_RunLoop_Events(t *testing.T) {
 						SagaType: testSagaType,
 						Data:     "num: 100",
 					},
+					{
+						Sequence:     22,
+						RootSequence: 18,
+						Type:         EventTypeRequestCompleted,
+						SagaType:     testSagaType,
+						RequestType:  testRequestFirst,
+						Data:         "response.value: 120",
+					},
 				},
 				startRequests: []startRequest{
 					{
-						sequence:    21,
-						sagaType:    testSagaType,
-						requestType: testRequestFirst,
-						rootData: testSaga{
+						rootSequence: 21,
+						sagaType:     testSagaType,
+						requestType:  testRequestFirst,
+						rootContent: testSaga{
 							num: 100,
+						},
+					},
+					{
+						rootSequence: 18,
+						sagaType:     testSagaType,
+						requestType:  testRequestSecond,
+						rootContent: testSaga{
+							num: 300,
+						},
+						dependentResponses: []interface{}{
+							testResponseContent{
+								value: 120,
+							},
 						},
 					},
 				},
@@ -193,6 +442,17 @@ func TestCoordinator_RunLoop_Events(t *testing.T) {
 	for _, e := range table {
 		t.Run(e.name, func(t *testing.T) {
 			c := NewCoordinator()
+			c.Register(testSagaType, testSagaDecoder, []RequestRegistry{
+				{
+					Type:         testRequestFirst,
+					Dependencies: nil,
+				},
+				{
+					Type:         testRequestSecond,
+					Dependencies: []RequestType{testRequestFirst},
+				},
+			})
+
 			c.sagaStates = e.sagaStatesBefore
 			c.lastSequence = e.lastSequenceBefore
 
@@ -212,6 +472,7 @@ func TestCoordinator_RunLoop_Events(t *testing.T) {
 			assert.Equal(t, e.output, output)
 			assert.Equal(t, e.sagaStatesAfter, c.sagaStates)
 			assert.Equal(t, e.lastSequenceAfter, c.lastSequence)
+			assert.Equal(t, 0, len(eventChan))
 		})
 	}
 }
