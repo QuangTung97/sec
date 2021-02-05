@@ -14,6 +14,8 @@ const (
 	EventTypeRequestCompleted EventType = 2
 	// EventTypeRequestPreconditionFailed is an error that should not be retry
 	EventTypeRequestPreconditionFailed EventType = 3
+	// EventTypeCompensatingRequestCompleted ...
+	EventTypeCompensatingRequestCompleted EventType = 4
 )
 
 // LogSequence ...
@@ -84,6 +86,10 @@ type waitingRequest struct {
 	dependencyCompletedCount int
 }
 
+type waitingCompensatingRequest struct {
+	dependedFinishedCount int
+}
+
 type completedRequest struct {
 	response interface{}
 }
@@ -101,8 +107,10 @@ type sagaState struct {
 	waitingRequests   map[RequestType]waitingRequest
 	completedRequests map[RequestType]completedRequest
 
-	failedRequests             map[RequestType]failedRequest
-	activeCompensatingRequests map[RequestType]struct{}
+	failedRequests                map[RequestType]failedRequest
+	waitingCompensatingRequests   map[RequestType]waitingCompensatingRequest
+	activeCompensatingRequests    map[RequestType]struct{}
+	completedCompensatingRequests map[RequestType]struct{}
 }
 
 // Coordinator ...
@@ -184,7 +192,11 @@ func (c *Coordinator) handleNewSaga(event Event, output runLoopOutput) runLoopOu
 
 	activeRequests := make(map[RequestType]struct{})
 	waitingRequests := make(map[RequestType]waitingRequest)
-	for reqType, req := range c.registry[event.SagaType].requests {
+	sagaConfig := c.registry[event.SagaType]
+
+	for _, reqType := range sagaConfig.allRequestTypes {
+		req := sagaConfig.requests[reqType]
+
 		if len(req.dependencies) == 0 {
 			activeRequests[reqType] = struct{}{}
 			startRequests = append(startRequests, startRequest{
@@ -260,7 +272,16 @@ func (c *Coordinator) handleRequestCompleted(event Event, output runLoopOutput) 
 		}
 	}
 
-	if len(state.activeRequests) == 0 {
+	startCompensatingRequests := output.startCompensatingRequests
+	if state.compensating {
+		startCompensatingRequests = append(startCompensatingRequests, startCompensatingRequest{
+			rootSequence: event.RootSequence,
+			sagaType:     event.SagaType,
+			requestType:  event.RequestType,
+		})
+	}
+
+	if !state.compensating && len(state.activeRequests) == 0 {
 		delete(c.sagaStates, event.RootSequence)
 	}
 
@@ -275,7 +296,62 @@ func (c *Coordinator) handleRequestCompleted(event Event, output runLoopOutput) 
 
 	output.saveLogEntries = saveLogEntries
 	output.startRequests = startRequests
+	output.startCompensatingRequests = startCompensatingRequests
 	return output
+}
+
+func finished(state *sagaState, requestType RequestType) bool {
+	_, existed := state.failedRequests[requestType]
+	if existed {
+		return true
+	}
+
+	_, existed = state.completedCompensatingRequests[requestType]
+	if existed {
+		return true
+	}
+
+	return false
+}
+
+func updateWaitingCompensatingRequests(
+	state *sagaState, sagaConfig sagaRegistryEntry, event Event,
+	startCompensatingRequests []startCompensatingRequest,
+) []startCompensatingRequest {
+	requestConfig := sagaConfig.requests[event.RequestType]
+	for _, dependentRequest := range requestConfig.dependencies {
+		dependentRequestConfig := sagaConfig.requests[dependentRequest]
+
+		var dependedFinishedCount int
+		waiting, existed := state.waitingCompensatingRequests[dependentRequest]
+		if existed {
+			dependedFinishedCount = waiting.dependedFinishedCount - 1
+		} else {
+			dependedFinishedCount = len(dependentRequestConfig.depended)
+			for _, dependedRequest := range dependentRequestConfig.depended {
+				if finished(state, dependedRequest) {
+					dependedFinishedCount--
+				}
+			}
+		}
+
+		if dependedFinishedCount > 0 {
+			state.waitingCompensatingRequests[dependentRequest] = waitingCompensatingRequest{
+				dependedFinishedCount: dependedFinishedCount,
+			}
+		} else {
+			delete(state.waitingCompensatingRequests, dependentRequest)
+			state.activeCompensatingRequests[dependentRequest] = struct{}{}
+
+			startCompensatingRequests = append(startCompensatingRequests, startCompensatingRequest{
+				rootSequence: event.RootSequence,
+				sagaType:     event.SagaType,
+				requestType:  dependentRequest,
+			})
+		}
+	}
+
+	return startCompensatingRequests
 }
 
 func (c *Coordinator) handleRequestPreconditionFailed(event Event, output runLoopOutput) runLoopOutput {
@@ -302,25 +378,51 @@ func (c *Coordinator) handleRequestPreconditionFailed(event Event, output runLoo
 		err: event.Error,
 	}
 
-	startCompensatingRequests := output.startCompensatingRequests
+	if state.waitingCompensatingRequests == nil {
+		state.waitingCompensatingRequests = map[RequestType]waitingCompensatingRequest{}
+	}
+	if state.activeCompensatingRequests == nil {
+		state.activeCompensatingRequests = map[RequestType]struct{}{}
+	}
 
-	for _, requestType := range sagaConfig.allRequestTypes {
-		_, existed := state.completedRequests[requestType]
-		if !existed {
-			continue
-		}
+	startCompensatingRequests := updateWaitingCompensatingRequests(
+		state, sagaConfig, event, output.startCompensatingRequests)
 
-		if state.activeCompensatingRequests == nil {
-			state.activeCompensatingRequests = map[RequestType]struct{}{}
-		}
-		state.activeCompensatingRequests[requestType] = struct{}{}
-		delete(state.completedRequests, requestType)
+	if len(state.activeCompensatingRequests) == 0 && len(state.waitingCompensatingRequests) == 0 {
+		delete(c.sagaStates, event.RootSequence)
+	}
 
-		startCompensatingRequests = append(startCompensatingRequests, startCompensatingRequest{
-			rootSequence: event.RootSequence,
-			sagaType:     event.SagaType,
-			requestType:  requestType,
-		})
+	output.saveLogEntries = saveLogEntries
+	output.startCompensatingRequests = startCompensatingRequests
+	return output
+}
+
+func (c *Coordinator) handleCompensatingRequestCompleted(event Event, output runLoopOutput) runLoopOutput {
+	saveLogEntries := output.saveLogEntries
+
+	saveLogEntries = append(saveLogEntries, LogEntry{
+		Sequence:     c.lastSequence,
+		RootSequence: event.RootSequence,
+		Type:         EventTypeCompensatingRequestCompleted,
+		SagaType:     event.SagaType,
+		RequestType:  event.RequestType,
+	})
+
+	state := c.sagaStates[event.RootSequence]
+	sagaConfig := c.registry[event.SagaType]
+
+	if state.completedCompensatingRequests == nil {
+		state.completedCompensatingRequests = map[RequestType]struct{}{}
+	}
+
+	delete(state.activeCompensatingRequests, event.RequestType)
+	state.completedCompensatingRequests[event.RequestType] = struct{}{}
+
+	startCompensatingRequests := updateWaitingCompensatingRequests(
+		state, sagaConfig, event, output.startCompensatingRequests)
+
+	if len(state.activeCompensatingRequests) == 0 && len(state.waitingCompensatingRequests) == 0 {
+		delete(c.sagaStates, event.RootSequence)
 	}
 
 	output.saveLogEntries = saveLogEntries
@@ -337,8 +439,10 @@ func (c *Coordinator) handleEvent(event Event, output runLoopOutput) runLoopOutp
 	if event.Type == EventTypeRequestCompleted {
 		return c.handleRequestCompleted(event, output)
 	}
-
-	return c.handleRequestPreconditionFailed(event, output)
+	if event.Type == EventTypeRequestPreconditionFailed {
+		return c.handleRequestPreconditionFailed(event, output)
+	}
+	return c.handleCompensatingRequestCompleted(event, output)
 }
 
 func (c *Coordinator) runLoop(ctx context.Context, input runLoopInput) (runLoopOutput, error) {
