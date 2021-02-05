@@ -1755,6 +1755,195 @@ func TestRunLoop_ComplexSagas(t *testing.T) {
 				},
 			},
 		},
+		{
+			name:         "single-saga-a-success-b-failed",
+			lastSequence: 30,
+			steps: []Step{
+				{
+					events: []Event{
+						{
+							Type:      EventTypeNewSaga,
+							SagaType:  sagaTypeB,
+							Content:   "saga.B.content.200",
+							Data:      "saga.B.data.200",
+							ReplyChan: replyChan,
+						},
+					},
+					output: runLoopOutput{
+						saveLogEntries: []LogEntry{
+							{
+								Sequence: 31,
+								Type:     EventTypeNewSaga,
+								Data:     "saga.B.data.200",
+								SagaType: sagaTypeB,
+							},
+						},
+						startRequests: []startRequest{
+							{
+								rootSequence: 31,
+								sagaType:     sagaTypeB,
+								requestType:  sagaBRequestA,
+								rootContent:  "saga.B.content.200",
+							},
+						},
+					},
+				},
+				{
+					events: []Event{
+						{
+							Type:         EventTypeRequestCompleted,
+							SagaType:     sagaTypeB,
+							RequestType:  sagaBRequestA,
+							RootSequence: 31,
+							Content:      "saga.B.req.A.content.222",
+							Data:         "saga.B.req.A.data.222",
+						},
+					},
+					output: runLoopOutput{
+						saveLogEntries: []LogEntry{
+							{
+								Sequence:     32,
+								Type:         EventTypeRequestCompleted,
+								RootSequence: 31,
+								Data:         "saga.B.req.A.data.222",
+								SagaType:     sagaTypeB,
+								RequestType:  sagaBRequestA,
+							},
+						},
+						startRequests: []startRequest{
+							{
+								rootSequence: 31,
+								sagaType:     sagaTypeB,
+								requestType:  sagaBRequestB,
+								rootContent:  "saga.B.content.200",
+								dependentResponses: []interface{}{
+									"saga.B.req.A.content.222",
+								},
+							},
+							{
+								rootSequence: 31,
+								sagaType:     sagaTypeB,
+								requestType:  sagaBRequestC,
+								rootContent:  "saga.B.content.200",
+								dependentResponses: []interface{}{
+									"saga.B.req.A.content.222",
+								},
+							},
+						},
+					},
+				},
+				{
+					events: []Event{
+						{
+							Type:         EventTypeRequestPreconditionFailed,
+							SagaType:     sagaTypeB,
+							RequestType:  sagaBRequestB,
+							RootSequence: 31,
+							Error:        errors.New("saga.B.req.B.error"),
+							Data:         "saga.B.req.B.data.error",
+						},
+						{
+							Type:         EventTypeRequestCompleted,
+							SagaType:     sagaTypeB,
+							RequestType:  sagaBRequestC,
+							RootSequence: 31,
+							Content:      "saga.B.req.C.content.330",
+							Data:         "saga.B.req.C.data.330",
+						},
+					},
+					output: runLoopOutput{
+						saveLogEntries: []LogEntry{
+							{
+								Sequence:     33,
+								Type:         EventTypeRequestPreconditionFailed,
+								RootSequence: 31,
+								Data:         "saga.B.req.B.data.error",
+								SagaType:     sagaTypeB,
+								RequestType:  sagaBRequestB,
+							},
+							{
+								Sequence:     34,
+								Type:         EventTypeRequestCompleted,
+								RootSequence: 31,
+								Data:         "saga.B.req.C.data.330",
+								SagaType:     sagaTypeB,
+								RequestType:  sagaBRequestC,
+							},
+						},
+						startCompensatingRequests: []startCompensatingRequest{
+							{
+								rootSequence: 31,
+								sagaType:     sagaTypeB,
+								requestType:  sagaBRequestC,
+							},
+						},
+					},
+				},
+				{
+					events: []Event{
+						{
+							Type:         EventTypeCompensatingRequestCompleted,
+							SagaType:     sagaTypeB,
+							RequestType:  sagaBRequestC,
+							RootSequence: 31,
+						},
+					},
+					output: runLoopOutput{
+						saveLogEntries: []LogEntry{
+							{
+								Sequence:     35,
+								Type:         EventTypeCompensatingRequestCompleted,
+								RootSequence: 31,
+								SagaType:     sagaTypeB,
+								RequestType:  sagaBRequestC,
+							},
+						},
+						startCompensatingRequests: []startCompensatingRequest{
+							{
+								rootSequence: 31,
+								sagaType:     sagaTypeB,
+								requestType:  sagaBRequestA,
+							},
+						},
+					},
+				},
+				{
+					events: []Event{
+						{
+							Type:         EventTypeCompensatingRequestCompleted,
+							SagaType:     sagaTypeB,
+							RequestType:  sagaBRequestA,
+							RootSequence: 31,
+						},
+					},
+					output: runLoopOutput{
+						saveLogEntries: []LogEntry{
+							{
+								Sequence:     36,
+								Type:         EventTypeCompensatingRequestCompleted,
+								RootSequence: 31,
+								SagaType:     sagaTypeB,
+								RequestType:  sagaBRequestA,
+							},
+						},
+						replyList: []replyAction{
+							{
+								replyChan: replyChan,
+								result: SagaResult{
+									Failed: true,
+									Errors: []SagaError{
+										{
+											RequestType: sagaBRequestB,
+											Error:       errors.New("saga.B.req.B.error"),
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
 	}
 
 	for _, e := range table {
@@ -1792,11 +1981,11 @@ func TestRunLoop_ComplexSagas(t *testing.T) {
 				},
 				{
 					Type:         sagaBRequestC,
-					Dependencies: []RequestType{sagaBRequestA, sagaBRequestB},
+					Dependencies: []RequestType{sagaBRequestA},
 				},
 				{
 					Type:         sagaBRequestD,
-					Dependencies: []RequestType{sagaBRequestB, sagaBRequestC},
+					Dependencies: []RequestType{sagaBRequestC},
 				},
 			})
 

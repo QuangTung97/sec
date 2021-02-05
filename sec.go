@@ -275,28 +275,30 @@ func (c *Coordinator) handleRequestCompleted(event Event, output runLoopOutput) 
 		response: event.Content,
 	}
 
-	for _, dependedRequest := range requestConfig.depended {
-		value := state.waitingRequests[dependedRequest]
-		value.dependencyCompletedCount++
-		state.waitingRequests[dependedRequest] = value
+	if !state.compensating {
+		for _, dependedRequest := range requestConfig.depended {
+			value := state.waitingRequests[dependedRequest]
+			value.dependencyCompletedCount++
+			state.waitingRequests[dependedRequest] = value
 
-		dependedReqConfig := sagaConfig.requests[dependedRequest]
-		if value.dependencyCompletedCount == len(dependedReqConfig.dependencies) {
-			delete(state.waitingRequests, dependedRequest)
-			state.activeRequests[dependedRequest] = struct{}{}
+			dependedReqConfig := sagaConfig.requests[dependedRequest]
+			if value.dependencyCompletedCount == len(dependedReqConfig.dependencies) {
+				delete(state.waitingRequests, dependedRequest)
+				state.activeRequests[dependedRequest] = struct{}{}
 
-			dependentResponses := make([]interface{}, 0, len(dependedReqConfig.dependencies))
-			for _, dependency := range dependedReqConfig.dependencies {
-				dependentResponses = append(dependentResponses, state.completedRequests[dependency].response)
+				dependentResponses := make([]interface{}, 0, len(dependedReqConfig.dependencies))
+				for _, dependency := range dependedReqConfig.dependencies {
+					dependentResponses = append(dependentResponses, state.completedRequests[dependency].response)
+				}
+
+				startRequests = append(startRequests, startRequest{
+					rootSequence:       event.RootSequence,
+					sagaType:           event.SagaType,
+					requestType:        dependedRequest,
+					rootContent:        state.content,
+					dependentResponses: dependentResponses,
+				})
 			}
-
-			startRequests = append(startRequests, startRequest{
-				rootSequence:       event.RootSequence,
-				sagaType:           event.SagaType,
-				requestType:        dependedRequest,
-				rootContent:        state.content,
-				dependentResponses: dependentResponses,
-			})
 		}
 	}
 
