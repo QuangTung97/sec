@@ -2,6 +2,7 @@ package sec
 
 import (
 	"context"
+	"errors"
 	"github.com/stretchr/testify/assert"
 	"testing"
 )
@@ -82,6 +83,8 @@ func TestCoordinator_Register(t *testing.T) {
 	request2 := entry.requests[testRequestSecond]
 	assert.Equal(t, request2.dependencies, []RequestType{testRequestFirst})
 	assert.Equal(t, request2.depended, []RequestType(nil))
+
+	assert.Equal(t, []RequestType{testRequestFirst, testRequestSecond}, entry.allRequestTypes)
 }
 
 func TestCoordinator_RunLoop_Events(t *testing.T) {
@@ -126,7 +129,6 @@ func TestCoordinator_RunLoop_Events(t *testing.T) {
 							dependencyCompletedCount: 0,
 						},
 					},
-					completedRequests: map[RequestType]completedRequest{},
 				},
 			},
 			output: runLoopOutput{
@@ -180,7 +182,6 @@ func TestCoordinator_RunLoop_Events(t *testing.T) {
 							dependencyCompletedCount: 0,
 						},
 					},
-					completedRequests: map[RequestType]completedRequest{},
 				},
 			},
 			sagaStatesAfter: map[LogSequence]*sagaState{
@@ -267,7 +268,6 @@ func TestCoordinator_RunLoop_Events(t *testing.T) {
 							dependencyCompletedCount: 0,
 						},
 					},
-					completedRequests: map[RequestType]completedRequest{},
 				},
 				12: {
 					sagaType: testSagaType,
@@ -282,7 +282,6 @@ func TestCoordinator_RunLoop_Events(t *testing.T) {
 							dependencyCompletedCount: 0,
 						},
 					},
-					completedRequests: map[RequestType]completedRequest{},
 				},
 			},
 			output: runLoopOutput{
@@ -358,7 +357,6 @@ func TestCoordinator_RunLoop_Events(t *testing.T) {
 							dependencyCompletedCount: 0,
 						},
 					},
-					completedRequests: map[RequestType]completedRequest{},
 				},
 			},
 			sagaStatesAfter: map[LogSequence]*sagaState{
@@ -392,7 +390,6 @@ func TestCoordinator_RunLoop_Events(t *testing.T) {
 							dependencyCompletedCount: 0,
 						},
 					},
-					completedRequests: map[RequestType]completedRequest{},
 				},
 			},
 			output: runLoopOutput{
@@ -433,6 +430,128 @@ func TestCoordinator_RunLoop_Events(t *testing.T) {
 								value: 120,
 							},
 						},
+					},
+				},
+			},
+		},
+		{
+			name: "saga-finished",
+			events: []Event{
+				{
+					Type:         EventTypeRequestCompleted,
+					SagaType:     testSagaType,
+					RootSequence: 18,
+					RequestType:  testRequestSecond,
+					Content: testResponseContent{
+						value: 250,
+					},
+					Data: "response.value: 250",
+				},
+			},
+			lastSequenceBefore: 30,
+			lastSequenceAfter:  31,
+			sagaStatesBefore: map[LogSequence]*sagaState{
+				18: {
+					sagaType: testSagaType,
+					content: testSaga{
+						num: 100,
+					},
+					activeRequests: map[RequestType]struct{}{
+						testRequestSecond: {},
+					},
+					waitingRequests: map[RequestType]waitingRequest{},
+					completedRequests: map[RequestType]completedRequest{
+						testRequestFirst: {
+							response: testResponseContent{
+								value: 120,
+							},
+						},
+					},
+				},
+			},
+			sagaStatesAfter: map[LogSequence]*sagaState{},
+			output: runLoopOutput{
+				saveLogEntries: []LogEntry{
+					{
+						Sequence:     31,
+						RootSequence: 18,
+						Type:         EventTypeRequestCompleted,
+						SagaType:     testSagaType,
+						RequestType:  testRequestSecond,
+						Data:         "response.value: 250",
+					},
+				},
+			},
+		},
+		{
+			name: "request-precondition-failed",
+			events: []Event{
+				{
+					Type:         EventTypeRequestPreconditionFailed,
+					SagaType:     testSagaType,
+					RootSequence: 18,
+					RequestType:  testRequestSecond,
+					Error:        errors.New("precondition-failed"),
+					Data:         "response.error: precondition-failed",
+				},
+			},
+			lastSequenceBefore: 30,
+			lastSequenceAfter:  31,
+			sagaStatesBefore: map[LogSequence]*sagaState{
+				18: {
+					sagaType: testSagaType,
+					content: testSaga{
+						num: 100,
+					},
+					activeRequests: map[RequestType]struct{}{
+						testRequestSecond: {},
+					},
+					waitingRequests: map[RequestType]waitingRequest{},
+					completedRequests: map[RequestType]completedRequest{
+						testRequestFirst: {
+							response: testResponseContent{
+								value: 120,
+							},
+						},
+					},
+				},
+			},
+			sagaStatesAfter: map[LogSequence]*sagaState{
+				18: {
+					sagaType:     testSagaType,
+					compensating: true,
+					content: testSaga{
+						num: 100,
+					},
+					activeRequests:    map[RequestType]struct{}{},
+					waitingRequests:   map[RequestType]waitingRequest{},
+					completedRequests: map[RequestType]completedRequest{},
+					failedRequests: map[RequestType]failedRequest{
+						testRequestSecond: {
+							err: errors.New("precondition-failed"),
+						},
+					},
+					activeCompensatingRequests: map[RequestType]struct{}{
+						testRequestFirst: {},
+					},
+				},
+			},
+			output: runLoopOutput{
+				saveLogEntries: []LogEntry{
+					{
+						Sequence:     31,
+						RootSequence: 18,
+						Type:         EventTypeRequestPreconditionFailed,
+						SagaType:     testSagaType,
+						RequestType:  testRequestSecond,
+						Data:         "response.error: precondition-failed",
+					},
+				},
+				startCompensatingRequests: []startCompensatingRequest{
+					{
+						rootSequence: 18,
+						sagaType:     testSagaType,
+						requestType:  testRequestFirst,
 					},
 				},
 			},
