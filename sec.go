@@ -64,6 +64,26 @@ type Event struct {
 	Content      interface{}
 	Error        error
 	Data         string
+	ReplyChan    chan<- SagaResult
+}
+
+// SagaResponse ...
+type SagaResponse struct {
+	RequestType RequestType
+	Response    interface{}
+}
+
+// SagaError ...
+type SagaError struct {
+	RequestType RequestType
+	Error       error
+}
+
+// SagaResult ...
+type SagaResult struct {
+	Failed    bool
+	Responses []SagaResponse
+	Errors    []SagaError
 }
 
 // LogEntry ...
@@ -102,6 +122,7 @@ type sagaState struct {
 	sagaType     SagaType
 	compensating bool
 	content      interface{}
+	replyChan    chan<- SagaResult
 
 	activeRequests    map[RequestType]struct{}
 	waitingRequests   map[RequestType]waitingRequest
@@ -138,10 +159,16 @@ type startCompensatingRequest struct {
 	requestType  RequestType
 }
 
+type replyAction struct {
+	replyChan chan<- SagaResult
+	result    SagaResult
+}
+
 type runLoopOutput struct {
 	saveLogEntries            []LogEntry
 	startRequests             []startRequest
 	startCompensatingRequests []startCompensatingRequest
+	replyList                 []replyAction
 }
 
 // NewCoordinator ...
@@ -215,6 +242,7 @@ func (c *Coordinator) handleNewSaga(event Event, output runLoopOutput) runLoopOu
 	c.sagaStates[c.lastSequence] = &sagaState{
 		sagaType:        event.SagaType,
 		content:         event.Content,
+		replyChan:       event.ReplyChan,
 		activeRequests:  activeRequests,
 		waitingRequests: waitingRequests,
 	}
@@ -281,8 +309,25 @@ func (c *Coordinator) handleRequestCompleted(event Event, output runLoopOutput) 
 		})
 	}
 
+	replyList := output.replyList
 	if !state.compensating && len(state.activeRequests) == 0 {
 		delete(c.sagaStates, event.RootSequence)
+
+		responses := make([]SagaResponse, 0, len(sagaConfig.allRequestTypes))
+		for _, requestType := range sagaConfig.allRequestTypes {
+			responses = append(responses, SagaResponse{
+				RequestType: requestType,
+				Response:    state.completedRequests[requestType].response,
+			})
+		}
+
+		replyList = append(replyList, replyAction{
+			replyChan: state.replyChan,
+			result: SagaResult{
+				Failed:    false,
+				Responses: responses,
+			},
+		})
 	}
 
 	saveLogEntries := append(output.saveLogEntries, LogEntry{
@@ -297,6 +342,7 @@ func (c *Coordinator) handleRequestCompleted(event Event, output runLoopOutput) 
 	output.saveLogEntries = saveLogEntries
 	output.startRequests = startRequests
 	output.startCompensatingRequests = startCompensatingRequests
+	output.replyList = replyList
 	return output
 }
 
@@ -354,6 +400,36 @@ func updateWaitingCompensatingRequests(
 	return startCompensatingRequests
 }
 
+func (c *Coordinator) checkSagaRollbackCompleted(
+	state *sagaState, rootSequence LogSequence,
+	sagaConfig sagaRegistryEntry, replyList []replyAction,
+) []replyAction {
+	if len(state.activeCompensatingRequests) == 0 && len(state.waitingCompensatingRequests) == 0 {
+		delete(c.sagaStates, rootSequence)
+
+		errors := make([]SagaError, 0, len(state.failedRequests))
+		for _, requestType := range sagaConfig.allRequestTypes {
+			failed, existed := state.failedRequests[requestType]
+			if existed {
+				errors = append(errors, SagaError{
+					RequestType: requestType,
+					Error:       failed.err,
+				})
+			}
+		}
+
+		replyList = append(replyList, replyAction{
+			replyChan: state.replyChan,
+			result: SagaResult{
+				Failed: true,
+				Errors: errors,
+			},
+		})
+	}
+
+	return replyList
+}
+
 func (c *Coordinator) handleRequestPreconditionFailed(event Event, output runLoopOutput) runLoopOutput {
 	saveLogEntries := output.saveLogEntries
 
@@ -388,12 +464,11 @@ func (c *Coordinator) handleRequestPreconditionFailed(event Event, output runLoo
 	startCompensatingRequests := updateWaitingCompensatingRequests(
 		state, sagaConfig, event, output.startCompensatingRequests)
 
-	if len(state.activeCompensatingRequests) == 0 && len(state.waitingCompensatingRequests) == 0 {
-		delete(c.sagaStates, event.RootSequence)
-	}
+	replyList := c.checkSagaRollbackCompleted(state, event.RootSequence, sagaConfig, output.replyList)
 
 	output.saveLogEntries = saveLogEntries
 	output.startCompensatingRequests = startCompensatingRequests
+	output.replyList = replyList
 	return output
 }
 
@@ -421,12 +496,11 @@ func (c *Coordinator) handleCompensatingRequestCompleted(event Event, output run
 	startCompensatingRequests := updateWaitingCompensatingRequests(
 		state, sagaConfig, event, output.startCompensatingRequests)
 
-	if len(state.activeCompensatingRequests) == 0 && len(state.waitingCompensatingRequests) == 0 {
-		delete(c.sagaStates, event.RootSequence)
-	}
+	replyList := c.checkSagaRollbackCompleted(state, event.RootSequence, sagaConfig, output.replyList)
 
 	output.saveLogEntries = saveLogEntries
 	output.startCompensatingRequests = startCompensatingRequests
+	output.replyList = replyList
 	return output
 }
 

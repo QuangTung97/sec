@@ -82,6 +82,8 @@ func TestCoordinator_Register(t *testing.T) {
 }
 
 func TestCoordinator_RunLoop_Events(t *testing.T) {
+	replyChan := make(chan SagaResult)
+
 	table := []struct {
 		name   string
 		events []Event
@@ -450,6 +452,7 @@ func TestCoordinator_RunLoop_Events(t *testing.T) {
 					content: testSaga{
 						num: 100,
 					},
+					replyChan: replyChan,
 					activeRequests: map[RequestType]struct{}{
 						testRequestSecond: {},
 					},
@@ -473,6 +476,28 @@ func TestCoordinator_RunLoop_Events(t *testing.T) {
 						SagaType:     testSagaType,
 						RequestType:  testRequestSecond,
 						Data:         "response.value: 250",
+					},
+				},
+				replyList: []replyAction{
+					{
+						replyChan: replyChan,
+						result: SagaResult{
+							Failed: false,
+							Responses: []SagaResponse{
+								{
+									RequestType: testRequestFirst,
+									Response: testResponseContent{
+										value: 120,
+									},
+								},
+								{
+									RequestType: testRequestSecond,
+									Response: testResponseContent{
+										value: 250,
+									},
+								},
+							},
+						},
 					},
 				},
 			},
@@ -573,12 +598,17 @@ func TestCoordinator_RunLoop_Events(t *testing.T) {
 				18: {
 					sagaType:     testSagaType,
 					compensating: true,
+					replyChan:    replyChan,
 					content: testSaga{
 						num: 100,
 					},
-					activeRequests:    map[RequestType]struct{}{},
-					waitingRequests:   map[RequestType]waitingRequest{},
-					completedRequests: map[RequestType]completedRequest{},
+					activeRequests:  map[RequestType]struct{}{},
+					waitingRequests: map[RequestType]waitingRequest{},
+					completedRequests: map[RequestType]completedRequest{
+						testRequestFirst: {
+							response: "test.request1.content.123",
+						},
+					},
 					failedRequests: map[RequestType]failedRequest{
 						testRequestSecond: {
 							err: errors.New("precondition-failed"),
@@ -598,6 +628,20 @@ func TestCoordinator_RunLoop_Events(t *testing.T) {
 						Type:         EventTypeCompensatingRequestCompleted,
 						SagaType:     testSagaType,
 						RequestType:  testRequestFirst,
+					},
+				},
+				replyList: []replyAction{
+					{
+						replyChan: replyChan,
+						result: SagaResult{
+							Failed: true,
+							Errors: []SagaError{
+								{
+									RequestType: testRequestSecond,
+									Error:       errors.New("precondition-failed"),
+								},
+							},
+						},
 					},
 				},
 			},
@@ -661,6 +705,8 @@ func TestRunLoop_ComplexSagas(t *testing.T) {
 		output runLoopOutput
 	}
 
+	replyChan := make(chan SagaResult)
+
 	table := []struct {
 		name         string
 		lastSequence LogSequence
@@ -673,10 +719,11 @@ func TestRunLoop_ComplexSagas(t *testing.T) {
 				{
 					events: []Event{
 						{
-							Type:     EventTypeNewSaga,
-							SagaType: sagaTypeA,
-							Content:  "saga.A.content.100",
-							Data:     "saga.A.data.100",
+							Type:      EventTypeNewSaga,
+							SagaType:  sagaTypeA,
+							Content:   "saga.A.content.100",
+							Data:      "saga.A.data.100",
+							ReplyChan: replyChan,
 						},
 					},
 					output: runLoopOutput{
@@ -846,6 +893,36 @@ func TestRunLoop_ComplexSagas(t *testing.T) {
 								RequestType:  sagaARequestE,
 							},
 						},
+						replyList: []replyAction{
+							{
+								replyChan: replyChan,
+								result: SagaResult{
+									Failed: false,
+									Responses: []SagaResponse{
+										{
+											RequestType: sagaARequestA,
+											Response:    "saga.A.req.A.content.140",
+										},
+										{
+											RequestType: sagaARequestB,
+											Response:    "saga.A.req.B.content.120",
+										},
+										{
+											RequestType: sagaARequestC,
+											Response:    "saga.A.req.C.content.160",
+										},
+										{
+											RequestType: sagaARequestD,
+											Response:    "saga.A.req.D.content.180",
+										},
+										{
+											RequestType: sagaARequestE,
+											Response:    "saga.A.req.E.content.199",
+										},
+									},
+								},
+							},
+						},
 					},
 				},
 			},
@@ -857,10 +934,11 @@ func TestRunLoop_ComplexSagas(t *testing.T) {
 				{
 					events: []Event{
 						{
-							Type:     EventTypeNewSaga,
-							SagaType: sagaTypeA,
-							Content:  "saga.A.content.100",
-							Data:     "saga.A.data.100",
+							Type:      EventTypeNewSaga,
+							SagaType:  sagaTypeA,
+							Content:   "saga.A.content.100",
+							Data:      "saga.A.data.100",
+							ReplyChan: replyChan,
 						},
 					},
 					output: runLoopOutput{
@@ -1132,6 +1210,20 @@ func TestRunLoop_ComplexSagas(t *testing.T) {
 								RequestType:  sagaARequestB,
 							},
 						},
+						replyList: []replyAction{
+							{
+								replyChan: replyChan,
+								result: SagaResult{
+									Failed: true,
+									Errors: []SagaError{
+										{
+											RequestType: sagaARequestD,
+											Error:       errors.New("saga.A.req.D.error"),
+										},
+									},
+								},
+							},
+						},
 					},
 				},
 			},
@@ -1143,10 +1235,11 @@ func TestRunLoop_ComplexSagas(t *testing.T) {
 				{
 					events: []Event{
 						{
-							Type:     EventTypeNewSaga,
-							SagaType: sagaTypeA,
-							Content:  "saga.A.content.100",
-							Data:     "saga.A.data.100",
+							Type:      EventTypeNewSaga,
+							SagaType:  sagaTypeA,
+							Content:   "saga.A.content.100",
+							Data:      "saga.A.data.100",
+							ReplyChan: replyChan,
 						},
 					},
 					output: runLoopOutput{
@@ -1390,6 +1483,24 @@ func TestRunLoop_ComplexSagas(t *testing.T) {
 								RequestType:  sagaARequestB,
 							},
 						},
+						replyList: []replyAction{
+							{
+								replyChan: replyChan,
+								result: SagaResult{
+									Failed: true,
+									Errors: []SagaError{
+										{
+											RequestType: sagaARequestD,
+											Error:       errors.New("saga.A.req.D.error"),
+										},
+										{
+											RequestType: sagaARequestE,
+											Error:       errors.New("saga.A.req.E.error"),
+										},
+									},
+								},
+							},
+						},
 					},
 				},
 			},
@@ -1401,10 +1512,11 @@ func TestRunLoop_ComplexSagas(t *testing.T) {
 				{
 					events: []Event{
 						{
-							Type:     EventTypeNewSaga,
-							SagaType: sagaTypeA,
-							Content:  "saga.A.content.100",
-							Data:     "saga.A.data.100",
+							Type:      EventTypeNewSaga,
+							SagaType:  sagaTypeA,
+							Content:   "saga.A.content.100",
+							Data:      "saga.A.data.100",
+							ReplyChan: replyChan,
 						},
 					},
 					output: runLoopOutput{
@@ -1552,6 +1664,20 @@ func TestRunLoop_ComplexSagas(t *testing.T) {
 								RequestType:  sagaARequestB,
 							},
 						},
+						replyList: []replyAction{
+							{
+								replyChan: replyChan,
+								result: SagaResult{
+									Failed: true,
+									Errors: []SagaError{
+										{
+											RequestType: sagaARequestC,
+											Error:       errors.New("saga.A.req.C.error"),
+										},
+									},
+								},
+							},
+						},
 					},
 				},
 			},
@@ -1563,10 +1689,11 @@ func TestRunLoop_ComplexSagas(t *testing.T) {
 				{
 					events: []Event{
 						{
-							Type:     EventTypeNewSaga,
-							SagaType: sagaTypeB,
-							Content:  "saga.B.content.200",
-							Data:     "saga.B.data.200",
+							Type:      EventTypeNewSaga,
+							SagaType:  sagaTypeB,
+							Content:   "saga.B.content.200",
+							Data:      "saga.B.data.200",
+							ReplyChan: replyChan,
 						},
 					},
 					output: runLoopOutput{
@@ -1608,6 +1735,20 @@ func TestRunLoop_ComplexSagas(t *testing.T) {
 								Data:         "saga.B.req.A.data.error",
 								SagaType:     sagaTypeB,
 								RequestType:  sagaBRequestA,
+							},
+						},
+						replyList: []replyAction{
+							{
+								replyChan: replyChan,
+								result: SagaResult{
+									Failed: true,
+									Errors: []SagaError{
+										{
+											RequestType: sagaBRequestA,
+											Error:       errors.New("saga.B.req.A.error"),
+										},
+									},
+								},
 							},
 						},
 					},
