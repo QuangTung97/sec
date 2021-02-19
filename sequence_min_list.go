@@ -92,3 +92,19 @@ func (l *SequenceMinList) Delete(index SequenceMinListIndex) {
 	l.free = index
 	l.length--
 }
+
+// AllSequences returns all sequences from min to max
+func (l *SequenceMinList) AllSequences() []LogSequence {
+	if l.length == 0 {
+		return nil
+	}
+
+	result := make([]LogSequence, 0, l.length)
+	p := l.next
+	for p != rootMinListIndex {
+		entry := l.data[p]
+		result = append(result, entry.sequence)
+		p = entry.next
+	}
+	return result
+}

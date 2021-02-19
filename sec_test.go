@@ -19,6 +19,30 @@ func TestCoordinator_RunLoop_Context(t *testing.T) {
 	assert.Equal(t, runLoopOutput{}, output)
 }
 
+func TestCoordinator_RunLoop_InvalidEvenType(t *testing.T) {
+	c := NewCoordinator(CoordinatorConfig{
+		BatchSize: 100,
+	})
+	eventChan := make(chan Event, 1)
+	eventChan <- Event{
+		Type: 1000,
+	}
+
+	defer func() {
+		value := recover()
+		if value == nil {
+			t.Fail()
+			return
+		}
+
+		assert.Equal(t, "invalid event type", value)
+	}()
+
+	_, _ = c.runLoop(context.Background(), runLoopInput{
+		eventChan: eventChan,
+	})
+}
+
 type testSaga struct {
 	num int
 }
@@ -91,8 +115,11 @@ func TestCoordinator_RunLoop_Events(t *testing.T) {
 		lastSequenceBefore LogSequence
 		lastSequenceAfter  LogSequence
 
-		sagaStatesBefore map[LogSequence]*sagaState
-		sagaStatesAfter  map[LogSequence]*sagaState
+		sequenceListBefore func(list *SequenceMinList)
+		sagaStatesBefore   map[LogSequence]*sagaState
+		sagaStatesAfter    map[LogSequence]*sagaState
+
+		expectedSequences []LogSequence
 
 		output runLoopOutput
 	}{
@@ -127,6 +154,7 @@ func TestCoordinator_RunLoop_Events(t *testing.T) {
 					},
 				},
 			},
+			expectedSequences: []LogSequence{11},
 			output: runLoopOutput{
 				saveLogEntries: []LogEntry{
 					{
@@ -164,6 +192,9 @@ func TestCoordinator_RunLoop_Events(t *testing.T) {
 			},
 			lastSequenceBefore: 20,
 			lastSequenceAfter:  21,
+			sequenceListBefore: func(list *SequenceMinList) {
+				list.Put(18)
+			},
 			sagaStatesBefore: map[LogSequence]*sagaState{
 				18: {
 					sagaType: testSagaType,
@@ -199,6 +230,7 @@ func TestCoordinator_RunLoop_Events(t *testing.T) {
 					},
 				},
 			},
+			expectedSequences: []LogSequence{18},
 			output: runLoopOutput{
 				saveLogEntries: []LogEntry{
 					{
@@ -278,8 +310,10 @@ func TestCoordinator_RunLoop_Events(t *testing.T) {
 							dependencyCompletedCount: 0,
 						},
 					},
+					sequenceListIndex: 1,
 				},
 			},
+			expectedSequences: []LogSequence{11, 12},
 			output: runLoopOutput{
 				saveLogEntries: []LogEntry{
 					{
@@ -339,6 +373,9 @@ func TestCoordinator_RunLoop_Events(t *testing.T) {
 			},
 			lastSequenceBefore: 20,
 			lastSequenceAfter:  22,
+			sequenceListBefore: func(list *SequenceMinList) {
+				list.Put(18)
+			},
 			sagaStatesBefore: map[LogSequence]*sagaState{
 				18: {
 					sagaType: testSagaType,
@@ -386,8 +423,10 @@ func TestCoordinator_RunLoop_Events(t *testing.T) {
 							dependencyCompletedCount: 0,
 						},
 					},
+					sequenceListIndex: 1,
 				},
 			},
+			expectedSequences: []LogSequence{18, 21},
 			output: runLoopOutput{
 				saveLogEntries: []LogEntry{
 					{
@@ -446,6 +485,9 @@ func TestCoordinator_RunLoop_Events(t *testing.T) {
 			},
 			lastSequenceBefore: 30,
 			lastSequenceAfter:  31,
+			sequenceListBefore: func(list *SequenceMinList) {
+				list.Put(18)
+			},
 			sagaStatesBefore: map[LogSequence]*sagaState{
 				18: {
 					sagaType: testSagaType,
@@ -594,6 +636,9 @@ func TestCoordinator_RunLoop_Events(t *testing.T) {
 			},
 			lastSequenceBefore: 30,
 			lastSequenceAfter:  31,
+			sequenceListBefore: func(list *SequenceMinList) {
+				list.Put(31)
+			},
 			sagaStatesBefore: map[LogSequence]*sagaState{
 				18: {
 					sagaType:     testSagaType,
@@ -664,6 +709,10 @@ func TestCoordinator_RunLoop_Events(t *testing.T) {
 				},
 			})
 
+			if e.sequenceListBefore != nil {
+				e.sequenceListBefore(c.sequenceList)
+			}
+
 			c.sagaStates = e.sagaStatesBefore
 			c.lastSequence = e.lastSequenceBefore
 
@@ -684,6 +733,7 @@ func TestCoordinator_RunLoop_Events(t *testing.T) {
 			assert.Equal(t, e.sagaStatesAfter, c.sagaStates)
 			assert.Equal(t, e.lastSequenceAfter, c.lastSequence)
 			assert.Equal(t, 0, len(eventChan))
+			assert.Equal(t, e.expectedSequences, c.sequenceList.AllSequences())
 		})
 	}
 }
@@ -2079,6 +2129,63 @@ func TestRunLoop_LimitBatchSize(t *testing.T) {
 	assert.Nil(t, err)
 
 	assert.Equal(t, 1, len(eventChan))
+}
+
+func TestRunLoop_Checkpoint(t *testing.T) {
+	const singleReqSaga SagaType = 1
+	const singleRequestType RequestType = 1
+
+	c := NewCoordinator(CoordinatorConfig{
+		BatchSize: 100,
+	})
+	c.Register(singleReqSaga, nil, []RequestRegistry{
+		{
+			Type: singleRequestType,
+		},
+	})
+	c.lastSequence = 100
+
+	eventChan := make(chan Event, 2)
+
+	eventChan <- Event{
+		Type:     EventTypeNewSaga,
+		SagaType: singleReqSaga,
+		Content:  "data.1",
+		Data:     "data.1",
+	}
+	eventChan <- Event{
+		Type: EventTypeSaveCheckpoint,
+	}
+
+	output, err := c.runLoop(context.Background(), runLoopInput{
+		eventChan: eventChan,
+	})
+	assert.Nil(t, err)
+	assert.Equal(t, NullLogSequence{
+		Valid:    true,
+		Sequence: 100,
+	}, output.saveCheckpoint)
+
+	eventChan <- Event{
+		Type:         EventTypeRequestCompleted,
+		SagaType:     singleReqSaga,
+		RootSequence: 101,
+		RequestType:  singleRequestType,
+		Content:      "req.data.1",
+		Data:         "req.data.1",
+	}
+	eventChan <- Event{
+		Type: EventTypeSaveCheckpoint,
+	}
+
+	output, err = c.runLoop(context.Background(), runLoopInput{
+		eventChan: eventChan,
+	})
+	assert.Nil(t, err)
+	assert.Equal(t, NullLogSequence{
+		Valid:    true,
+		Sequence: 102,
+	}, output.saveCheckpoint)
 }
 
 func TestRecover(t *testing.T) {

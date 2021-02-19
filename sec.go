@@ -16,10 +16,18 @@ const (
 	EventTypeRequestPreconditionFailed EventType = 3
 	// EventTypeCompensatingRequestCompleted ...
 	EventTypeCompensatingRequestCompleted EventType = 4
+	// EventTypeSaveCheckpoint ...
+	EventTypeSaveCheckpoint EventType = 5
 )
 
 // LogSequence ...
 type LogSequence uint64
+
+// NullLogSequence ...
+type NullLogSequence struct {
+	Valid    bool
+	Sequence LogSequence
+}
 
 // SagaType ...
 type SagaType int
@@ -132,6 +140,8 @@ type sagaState struct {
 	waitingCompensatingRequests   map[RequestType]waitingCompensatingRequest
 	activeCompensatingRequests    map[RequestType]struct{}
 	completedCompensatingRequests map[RequestType]struct{}
+
+	sequenceListIndex SequenceMinListIndex
 }
 
 // CoordinatorConfig for configuring Coordinator
@@ -146,6 +156,7 @@ type Coordinator struct {
 	registry     map[SagaType]sagaRegistryEntry
 	sagaStates   map[LogSequence]*sagaState
 	lastSequence LogSequence
+	sequenceList *SequenceMinList
 }
 
 type runLoopInput struct {
@@ -176,6 +187,7 @@ type runLoopOutput struct {
 	startRequests             []startRequest
 	startCompensatingRequests []startCompensatingRequest
 	replyList                 []replyAction
+	saveCheckpoint            NullLogSequence
 }
 
 // NewCoordinator ...
@@ -183,8 +195,9 @@ func NewCoordinator(conf CoordinatorConfig) *Coordinator {
 	return &Coordinator{
 		config: conf,
 
-		registry:   map[SagaType]sagaRegistryEntry{},
-		sagaStates: map[LogSequence]*sagaState{},
+		registry:     map[SagaType]sagaRegistryEntry{},
+		sagaStates:   map[LogSequence]*sagaState{},
+		sequenceList: NewSequenceMinList(1000),
 	}
 }
 
@@ -248,12 +261,15 @@ func (c *Coordinator) handleNewSaga(event Event, output runLoopOutput) runLoopOu
 		}
 	}
 
+	sequenceListIndex := c.sequenceList.Put(c.lastSequence)
+
 	c.sagaStates[c.lastSequence] = &sagaState{
-		sagaType:        event.SagaType,
-		content:         event.Content,
-		replyChan:       event.ReplyChan,
-		activeRequests:  activeRequests,
-		waitingRequests: waitingRequests,
+		sagaType:          event.SagaType,
+		content:           event.Content,
+		replyChan:         event.ReplyChan,
+		activeRequests:    activeRequests,
+		waitingRequests:   waitingRequests,
+		sequenceListIndex: sequenceListIndex,
 	}
 
 	saveLogEntries := append(output.saveLogEntries, LogEntry{
@@ -323,6 +339,7 @@ func (c *Coordinator) handleRequestCompleted(event Event, output runLoopOutput) 
 	replyList := output.replyList
 	if !state.compensating && len(state.activeRequests) == 0 {
 		delete(c.sagaStates, event.RootSequence)
+		c.sequenceList.Delete(state.sequenceListIndex)
 
 		responses := make([]SagaResponse, 0, len(sagaConfig.allRequestTypes))
 		for _, requestType := range sagaConfig.allRequestTypes {
@@ -417,6 +434,7 @@ func (c *Coordinator) checkSagaRollbackCompleted(
 ) []replyAction {
 	if len(state.activeCompensatingRequests) == 0 && len(state.waitingCompensatingRequests) == 0 {
 		delete(c.sagaStates, rootSequence)
+		c.sequenceList.Delete(state.sequenceListIndex)
 
 		errors := make([]SagaError, 0, len(state.failedRequests))
 		for _, requestType := range sagaConfig.allRequestTypes {
@@ -515,19 +533,45 @@ func (c *Coordinator) handleCompensatingRequestCompleted(event Event, output run
 	return output
 }
 
+func (c *Coordinator) getCheckpoint() LogSequence {
+	if c.sequenceList.Len() > 0 {
+		return c.sequenceList.MinSequence() - 1
+	}
+	return c.lastSequence
+}
+
+func (c *Coordinator) handleSaveCheckpoint(output runLoopOutput) runLoopOutput {
+	c.lastSequence--
+
+	output.saveCheckpoint = NullLogSequence{
+		Valid:    true,
+		Sequence: c.getCheckpoint(),
+	}
+	return output
+}
+
 func (c *Coordinator) handleEvent(event Event, output runLoopOutput) runLoopOutput {
 	c.lastSequence++
 
-	if event.Type == EventTypeNewSaga {
+	switch event.Type {
+	case EventTypeNewSaga:
 		return c.handleNewSaga(event, output)
-	}
-	if event.Type == EventTypeRequestCompleted {
+
+	case EventTypeRequestCompleted:
 		return c.handleRequestCompleted(event, output)
-	}
-	if event.Type == EventTypeRequestPreconditionFailed {
+
+	case EventTypeRequestPreconditionFailed:
 		return c.handleRequestPreconditionFailed(event, output)
+
+	case EventTypeCompensatingRequestCompleted:
+		return c.handleCompensatingRequestCompleted(event, output)
+
+	case EventTypeSaveCheckpoint:
+		return c.handleSaveCheckpoint(output)
+
+	default:
+		panic("invalid event type")
 	}
-	return c.handleCompensatingRequestCompleted(event, output)
 }
 
 func (c *Coordinator) runLoop(ctx context.Context, input runLoopInput) (runLoopOutput, error) {

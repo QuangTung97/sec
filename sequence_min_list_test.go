@@ -62,11 +62,18 @@ func TestSequenceMinList(t *testing.T) {
 
 func TestSequenceMinList2(t *testing.T) {
 	list := NewSequenceMinList(5)
+
+	var sequences []LogSequence
+	assert.Equal(t, sequences, list.AllSequences())
+
 	list.Put(20)
 	list.Put(21)
 	list.Put(22)
 	list.Put(23)
 	list.Put(24)
+
+	sequences = []LogSequence{20, 21, 22, 23, 24}
+	assert.Equal(t, sequences, list.AllSequences())
 
 	list.Delete(1)
 	assert.Equal(t, LogSequence(20), list.MinSequence())
