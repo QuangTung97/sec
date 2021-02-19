@@ -2080,3 +2080,7 @@ func TestRunLoop_LimitBatchSize(t *testing.T) {
 
 	assert.Equal(t, 1, len(eventChan))
 }
+
+func TestRecover(t *testing.T) {
+
+}
