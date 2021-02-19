@@ -134,8 +134,15 @@ type sagaState struct {
 	completedCompensatingRequests map[RequestType]struct{}
 }
 
+// CoordinatorConfig for configuring Coordinator
+type CoordinatorConfig struct {
+	BatchSize int
+}
+
 // Coordinator ...
 type Coordinator struct {
+	config CoordinatorConfig
+
 	registry     map[SagaType]sagaRegistryEntry
 	sagaStates   map[LogSequence]*sagaState
 	lastSequence LogSequence
@@ -172,8 +179,10 @@ type runLoopOutput struct {
 }
 
 // NewCoordinator ...
-func NewCoordinator() *Coordinator {
+func NewCoordinator(conf CoordinatorConfig) *Coordinator {
 	return &Coordinator{
+		config: conf,
+
 		registry:   map[SagaType]sagaRegistryEntry{},
 		sagaStates: map[LogSequence]*sagaState{},
 	}
@@ -528,7 +537,7 @@ func (c *Coordinator) runLoop(ctx context.Context, input runLoopInput) (runLoopO
 		output = c.handleEvent(event, output)
 
 	BatchLoop:
-		for {
+		for eventCount := 1; eventCount < c.config.BatchSize; eventCount++ {
 			select {
 			case e := <-input.eventChan:
 				output = c.handleEvent(e, output)

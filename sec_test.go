@@ -8,7 +8,7 @@ import (
 )
 
 func TestCoordinator_RunLoop_Context(t *testing.T) {
-	c := NewCoordinator()
+	c := NewCoordinator(CoordinatorConfig{})
 
 	ctx := context.Background()
 	ctx, cancel := context.WithCancel(ctx)
@@ -37,7 +37,7 @@ func testSagaDecoder(string) interface{} {
 }
 
 func TestCoordinator_Register(t *testing.T) {
-	c := NewCoordinator()
+	c := NewCoordinator(CoordinatorConfig{})
 	sagaDecoder := testSagaDecoder
 
 	c.Register(testSagaType, sagaDecoder,
@@ -650,7 +650,9 @@ func TestCoordinator_RunLoop_Events(t *testing.T) {
 
 	for _, e := range table {
 		t.Run(e.name, func(t *testing.T) {
-			c := NewCoordinator()
+			c := NewCoordinator(CoordinatorConfig{
+				BatchSize: 100,
+			})
 			c.Register(testSagaType, testSagaDecoder, []RequestRegistry{
 				{
 					Type:         testRequestFirst,
@@ -1950,7 +1952,9 @@ func TestRunLoop_ComplexSagas(t *testing.T) {
 		t.Run(e.name, func(t *testing.T) {
 			ctx := context.Background()
 
-			c := NewCoordinator()
+			c := NewCoordinator(CoordinatorConfig{
+				BatchSize: 1000,
+			})
 			c.Register(sagaTypeA, nil, []RequestRegistry{
 				{
 					Type: sagaARequestA,
@@ -2007,4 +2011,72 @@ func TestRunLoop_ComplexSagas(t *testing.T) {
 			assert.Equal(t, 0, len(c.sagaStates))
 		})
 	}
+}
+
+func TestRunLoop_LimitBatchSize(t *testing.T) {
+	const sagaType SagaType = 1
+	const sagaRequestA RequestType = 1
+	const sagaRequestB RequestType = 2
+	const sagaRequestC RequestType = 3
+
+	const lastSequence LogSequence = 30
+
+	conf := CoordinatorConfig{
+		BatchSize: 3,
+	}
+
+	c := NewCoordinator(conf)
+	c.Register(sagaType, nil, []RequestRegistry{
+		{
+			Type: sagaRequestA,
+		},
+		{
+			Type:         sagaRequestB,
+			Dependencies: []RequestType{sagaRequestA},
+		},
+		{
+			Type:         sagaRequestC,
+			Dependencies: []RequestType{sagaRequestA},
+		},
+	})
+	c.lastSequence = lastSequence
+
+	eventChan := make(chan Event, 10)
+	events := []Event{
+		{
+			Type:     EventTypeNewSaga,
+			SagaType: sagaType,
+			Content:  "content.1",
+			Data:     "data.1",
+		},
+		{
+			Type:     EventTypeNewSaga,
+			SagaType: sagaType,
+			Content:  "content.2",
+			Data:     "data.2",
+		},
+		{
+			Type:     EventTypeNewSaga,
+			SagaType: sagaType,
+			Content:  "content.3",
+			Data:     "data.3",
+		},
+		{
+			Type:     EventTypeNewSaga,
+			SagaType: sagaType,
+			Content:  "content.4",
+			Data:     "data.4",
+		},
+	}
+
+	for _, event := range events {
+		eventChan <- event
+	}
+
+	_, err := c.runLoop(context.Background(), runLoopInput{
+		eventChan: eventChan,
+	})
+	assert.Nil(t, err)
+
+	assert.Equal(t, 1, len(eventChan))
 }
